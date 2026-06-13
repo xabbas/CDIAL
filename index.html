@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CDIAL Explorer — Shina & Dardic Dictionary</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="topbar">
+  <div class="logo">CDIAL <span>Turner's Comparative Dictionary</span></div>
+  <div class="search-wrap">
+    <span class="search-icon">🔍</span>
+    <input type="text" id="searchInput" placeholder="Search headword, gloss, Shina form…" autocomplete="off" spellcheck="false">
+    <button class="search-clear" id="searchClear" title="Clear">✕</button>
+  </div>
+  <div class="topbar-right">
+    <div class="top-stat" id="topStat">Loading…</div>
+  </div>
+</div>
+
+<div class="layout">
+  <div class="sidebar">
+    <div class="filter-group">
+      <div class="filter-label">Show entries</div>
+      <div class="chip-row">
+        <div class="chip active" data-filter="all">All</div>
+        <div class="chip" data-filter="shina">Shina only</div>
+      </div>
+    </div>
+
+    <div class="filter-group">
+      <div class="filter-label">Language family</div>
+      <div class="chip-row" id="familyChips">
+        <div class="chip active" data-family="all">All</div>
+        <div class="chip" data-family="Dardic">Dardic</div>
+        <div class="chip" data-family="NIA">NIA</div>
+        <div class="chip" data-family="MIA">MIA</div>
+        <div class="chip" data-family="Kafiri">Kafiri</div>
+        <div class="chip" data-family="Iranian">Iranian</div>
+        <div class="chip" data-family="OIA">OIA</div>
+      </div>
+    </div>
+
+    <div class="filter-group">
+      <div class="filter-label">Shina dialect</div>
+      <div class="chip-row" id="dialectChips">
+        <div class="chip dialect active" data-dialect="all">All</div>
+        <div class="chip dialect" data-dialect="gil.">gil.</div>
+        <div class="chip dialect" data-dialect="koh.">koh.</div>
+        <div class="chip dialect" data-dialect="gur.">gur.</div>
+        <div class="chip dialect" data-dialect="pales.">pales.</div>
+        <div class="chip dialect" data-dialect="bro.">bro.</div>
+        <div class="chip dialect" data-dialect="punl.">punl.</div>
+        <div class="chip dialect" data-dialect="dr.">dr.</div>
+      </div>
+    </div>
+
+    <div class="filter-group">
+      <div class="filter-label">Options</div>
+      <label class="filter-check"><input type="checkbox" id="optInherited"> Inherited gloss only</label>
+      <label class="filter-check"><input type="checkbox" id="optShowEtym" checked> Show etymology</label>
+      <label class="filter-check"><input type="checkbox" id="optCollapseOther"> Collapse non-Shina</label>
+    </div>
+
+    <div class="sidebar-stats">
+      <div class="sstat"><div class="sstat-n" id="statTotal">–</div><div class="sstat-l">total entries</div></div>
+      <div class="sstat"><div class="sstat-n" id="statShina">–</div><div class="sstat-l">with Shina</div></div>
+      <div class="sstat"><div class="sstat-n" id="statForms">–</div><div class="sstat-l">Shina forms</div></div>
+      <div class="sstat"><div class="sstat-n" id="statResults">–</div><div class="sstat-l">matching</div></div>
+    </div>
+  </div>
+
+  <div class="main" id="main">
+    <div class="loading" id="loadingMsg">
+      <div style="font-size:32px;margin-bottom:12px">📖</div>
+      <div>Loading dictionary…</div>
+      <div style="font-size:12px;margin-top:8px;color:var(--text3)">Drop your JSON file below if it doesn't load automatically</div>
+      <div style="margin-top:16px">
+        <input type="file" id="fileInput" accept=".json" style="display:none">
+        <button onclick="document.getElementById('fileInput').click()" style="padding:8px 16px;border:1px solid var(--border2);border-radius:6px;background:var(--surface);color:var(--text);cursor:pointer;font-size:13px;font-family:system-ui,sans-serif">
+          Load JSON file
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
