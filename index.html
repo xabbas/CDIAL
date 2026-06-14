@@ -3,16 +3,69 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CDIAL Explorer — Shina & Dardic Dictionary</title>
+<title>CDIAL Explorer — Shina &amp; Dardic Dictionary</title>
 <link rel="stylesheet" href="style.css">
+<style>
+.per-page-wrap {
+  display:flex; align-items:center; gap:6px;
+  font-size:12px; font-family:system-ui,sans-serif; color:var(--text2);
+}
+.per-page-wrap select {
+  font-size:12px; font-family:system-ui,sans-serif;
+  padding:3px 6px; border:1px solid var(--border2);
+  border-radius:var(--radius-sm); background:var(--surface); color:var(--text);
+  cursor:pointer;
+}
+.page-numbers { display:flex; gap:4px; align-items:center; }
+.page-num-btn {
+  min-width:32px; padding:4px 8px;
+  border:1px solid var(--border2); border-radius:var(--radius-sm);
+  background:var(--surface); color:var(--text2);
+  cursor:pointer; font-size:12px; font-family:system-ui,sans-serif;
+  text-decoration:none; text-align:center;
+  transition:all .12s;
+}
+.page-num-btn:hover { border-color:var(--shina); color:var(--shina); }
+.page-num-btn.current {
+  background:var(--shina-bg); border-color:var(--shina-border);
+  color:var(--shina); font-weight:700;
+}
+.page-ellipsis { color:var(--text3); padding:0 2px; font-size:13px; }
+.loading-spinner {
+  display:inline-block; width:16px; height:16px;
+  border:2px solid var(--border2); border-top-color:var(--shina);
+  border-radius:50%; animation:spin .7s linear infinite; vertical-align:middle;
+}
+@keyframes spin { to { transform:rotate(360deg); } }
+#loadingOverlay {
+  display:none; position:fixed; inset:0; background:rgba(0,0,0,.25);
+  z-index:200; align-items:center; justify-content:center;
+}
+#loadingOverlay.active { display:flex; }
+.loading-box {
+  background:var(--surface); border-radius:var(--radius);
+  padding:24px 32px; box-shadow:0 8px 30px rgba(0,0,0,.2);
+  font-family:system-ui,sans-serif; font-size:14px; color:var(--text2);
+  display:flex; align-items:center; gap:12px;
+}
+</style>
 </head>
 <body>
+
+<div id="loadingOverlay">
+  <div class="loading-box">
+    <span class="loading-spinner"></span>
+    Loading entries…
+  </div>
+</div>
 
 <div class="topbar">
   <div class="logo">CDIAL <span>Turner's Comparative Dictionary</span></div>
   <div class="search-wrap">
     <span class="search-icon">🔍</span>
-    <input type="text" id="searchInput" placeholder="Search headword, gloss, Shina form…" autocomplete="off" spellcheck="false">
+    <input type="text" id="searchInput"
+           placeholder="Search headword, gloss, Shina form…"
+           autocomplete="off" spellcheck="false">
     <button class="search-clear" id="searchClear" title="Clear">✕</button>
   </div>
   <div class="topbar-right">
@@ -73,20 +126,31 @@
   </div>
 
   <div class="main" id="main">
-    <div class="loading" id="loadingMsg">
-      <div style="font-size:32px;margin-bottom:12px">📖</div>
-      <div>Loading dictionary…</div>
-      <div style="font-size:12px;margin-top:8px;color:var(--text3)">Drop your JSON file below if it doesn't load automatically</div>
-      <div style="margin-top:16px">
-        <input type="file" id="fileInput" accept=".json" style="display:none">
-        <button onclick="document.getElementById('fileInput').click()" style="padding:8px 16px;border:1px solid var(--border2);border-radius:6px;background:var(--surface);color:var(--text);cursor:pointer;font-size:13px;font-family:system-ui,sans-serif">
-          Load JSON file
-        </button>
+    <!-- toolbar -->
+    <div class="toolbar" id="toolbar" style="display:none">
+      <span class="result-count" id="resultCount"></span>
+      <div class="per-page-wrap" style="margin-left:auto">
+        Entries per page:
+        <select id="perPageSel">
+          <option value="10">10</option>
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
       </div>
+      <select class="sort-sel" id="sortSel">
+        <option value="num">Sort: Entry #</option>
+        <option value="alpha">Sort: A–Z</option>
+      </select>
     </div>
+
+    <!-- entry list -->
+    <div id="entryList"></div>
+
+    <!-- pagination -->
+    <div class="pagination" id="pagination" style="display:none"></div>
   </div>
 </div>
-
 <script src="script.js"></script>
 </body>
 </html>
