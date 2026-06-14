@@ -1,511 +1,400 @@
-// ── STATE ──
-let ALL_ENTRIES = [];
-let filtered = [];
-let currentPage = 1;
-const PER_PAGE = 25;
+// ── CONFIG ───────────────────────────────────────────────────────────────────
+const API_BASE = 'https://kaz.alwaysdata.net/api.php';
 
-let state = {
-  query: '',
-  filterMode: 'all',     // all | shina
-  family: 'all',
-  dialect: 'all',
-  inherited: false,
-  showEtym: true,
+// ── STATE ────────────────────────────────────────────────────────────────────
+const STATE = {
+  q:             '',
+  filter:        'all',
+  family:        'all',
+  dialect:       'all',
+  inherited:     false,
+  showEtym:      true,
   collapseOther: false,
+  sort:          'num',
+  page:          1,
+  perPage:       25,
 };
+
+// Read URL params on load
+(function() {
+  const p = new URLSearchParams(location.search);
+  if (p.get('q'))        STATE.q        = p.get('q');
+  if (p.get('filter'))   STATE.filter   = p.get('filter');
+  if (p.get('family'))   STATE.family   = p.get('family');
+  if (p.get('dialect'))  STATE.dialect  = p.get('dialect');
+  if (p.get('sort'))     STATE.sort     = p.get('sort');
+  if (p.get('page'))     STATE.page     = Math.max(1, parseInt(p.get('page')) || 1);
+  if (p.get('per_page')) STATE.perPage  = Math.min(100, Math.max(10, parseInt(p.get('per_page')) || 25));
+  if (p.get('inherited') === '1') STATE.inherited = true;
+})();
 
 const DIALECT_NAMES = {
-  'gil.': 'Gilgiti', 'koh.': 'Kohistani', 'gur.': 'Guresi',
-  'pales.': 'Palesi', 'bro.': 'Brokpa', 'jij.': 'Jijelut',
-  'punl.': 'Puniali', 'chil.': 'Chilasi', 'dr.': 'Dras',
-  'kōl.': 'Kola', 'Sh.': 'General'
+  'gil.':'Gilgiti','koh.':'Kohistani','gur.':'Guresi',
+  'pales.':'Palesi','bro.':'Brokpa','jij.':'Jijelut',
+  'punl.':'Puniali','chil.':'Chilasi','dr.':'Dras',
+  'kōl.':'Kola','Sh.':'General'
 };
-
 const FAMILY_CLASS = {
-  'NIA': 'lb-nia', 'MIA': 'lb-mia', 'OIA': 'lb-oia',
-  'Dardic': 'lb-dardic', 'Kafiri': 'lb-kafiri',
-  'Iranian': 'lb-iranian'
+  'NIA':'lb-nia','MIA':'lb-mia','OIA':'lb-oia',
+  'Dardic':'lb-dardic','Kafiri':'lb-kafiri','Iranian':'lb-iranian'
 };
 
-// ── LOAD DATA ──
-async function tryAutoLoad() {
-  const main = document.getElementById('main');
-  
-  // Production paths for your GitHub repository structure
-  const jsonPaths = [
-    'data/cdial_full.json',
-    'cdial_full.json',
-    'data/cdial_shina.json',
-    'cdial_shina.json'
-  ];
+// ── DOM REFS ─────────────────────────────────────────────────────────────────
+const $            = id => document.getElementById(id);
+const searchInput  = $('searchInput');
+const searchClear  = $('searchClear');
+const entryList    = $('entryList');
+const toolbar      = $('toolbar');
+const pagination   = $('pagination');
+const topStat      = $('topStat');
+const resultCount  = $('resultCount');
+const perPageSel   = $('perPageSel');
+const sortSel      = $('sortSel');
+const loadingOverlay = $('loadingOverlay');
 
-  for (const path of jsonPaths) {
-    try {
-      logLoadingStatus(`Fetching ${path}...`);
-      const r = await fetch(path);
-      if (r.ok) {
-        logLoadingStatus("Parsing dictionary database...");
-        const data = await r.json();
-        if (Array.isArray(data) && data.length > 0) {
-          initData(data);
-          return;
-        }
-      }
-    } catch(e) {
-      console.warn(`Failed asset fetch at path: ${path}`, e);
+// Restore input values from state
+searchInput.value = STATE.q;
+if (STATE.q) searchClear.style.display = 'block';
+perPageSel.value = STATE.perPage;
+sortSel.value    = STATE.sort;
+
+// Restore active chips
+function restoreChips() {
+  document.querySelectorAll('.chip[data-filter]').forEach(c => {
+    c.classList.toggle('active', c.dataset.filter === STATE.filter);
+  });
+  document.querySelectorAll('.chip[data-family]').forEach(c => {
+    c.classList.toggle('active', c.dataset.family === STATE.family);
+  });
+  document.querySelectorAll('.chip[data-dialect]').forEach(c => {
+    c.classList.toggle('active', c.dataset.dialect === STATE.dialect);
+  });
+  $('optInherited').checked = STATE.inherited;
+}
+restoreChips();
+
+// ── STATS ─────────────────────────────────────────────────────────────────────
+fetch(API_BASE + '?stats=1')
+  .then(r => r.json())
+  .then(s => {
+    $('statTotal').textContent = s.total.toLocaleString();
+    $('statShina').textContent = s.with_shina.toLocaleString();
+    $('statForms').textContent = s.shina_forms.toLocaleString();
+  })
+  .catch(() => {});
+
+// ── FETCH ENTRIES ─────────────────────────────────────────────────────────────
+let fetchController = null;
+let searchTimer     = null;
+
+function buildParams() {
+  const p = new URLSearchParams({
+    q:        STATE.q,
+    filter:   STATE.filter,
+    family:   STATE.family,
+    dialect:  STATE.dialect,
+    sort:     STATE.sort,
+    page:     STATE.page,
+    per_page: STATE.perPage,
+  });
+  if (STATE.inherited) p.set('inherited', '1');
+  return p;
+}
+
+async function loadEntries() {
+  if (fetchController) fetchController.abort();
+  fetchController = new AbortController();
+
+  loadingOverlay.classList.add('active');
+  toolbar.style.display    = 'none';
+  pagination.style.display = 'none';
+
+  const params = buildParams();
+  history.replaceState(null, '', '?' + params.toString());
+
+  try {
+    const r    = await fetch(API_BASE + '?' + params.toString(), { signal: fetchController.signal });
+    const data = await r.json();
+    loadingOverlay.classList.remove('active');
+    renderEntries(data);
+  } catch(e) {
+    if (e.name !== 'AbortError') {
+      loadingOverlay.classList.remove('active');
+      entryList.innerHTML = `<div class="empty-state"><h2>Error loading data</h2><p>${e.message}</p></div>`;
     }
   }
-
-  // Fallback layout when hosted files are missing from GitHub
-  main.innerHTML = `
-    <div class="empty-state">
-      <div style="font-size:40px;margin-bottom:16px">⚠️</div>
-      <h2>Data Source Not Found</h2>
-      <p>Could not automatically fetch the CDIAL dataset records.</p>
-      <div style="font-size:13px;color:var(--text3);margin-top:12px;background:rgba(0,0,0,0.03);padding:12px;border-radius:6px;max-width:460px;display:inline-block;text-align:left;line-height:1.4;">
-        <strong>GitHub Pages Deployment Check:</strong><br>
-        1. Verify <code>cdial_full.json</code> or <code>cdial_shina.json</code> is committed.<br>
-        2. Ensure the files are inside a <code>data/</code> directory or directly in the root of your main repository branch.
-      </div>
-    </div>
-  `;
 }
 
-function logLoadingStatus(message) {
-  const msgDiv = document.getElementById('loadingMsg');
-  if (msgDiv) {
-    let label = msgDiv.querySelector('.status-label');
-    if (!label) {
-      label = document.createElement('div');
-      label.className = 'status-label';
-      label.style.cssText = "font-size:13px; margin-top:8px; color:var(--text2); font-weight:500;";
-      msgDiv.appendChild(label);
-    }
-    label.textContent = message;
-  }
-}
+// ── RENDER ENTRIES ───────────────────────────────────────────────────────────
+function renderEntries(data) {
+  const { entries, total, page, per_page, total_pages } = data;
 
-function handleFile(e) {
-  const file = e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = ev => {
-    try {
-      const data = JSON.parse(ev.target.result);
-      if (Array.isArray(data)) initData(data);
-      else if (data.entries) initData(data.entries);
-    } catch(err) {
-      alert('Could not parse JSON: ' + err.message);
-    }
-  };
-  reader.readAsText(file);
-}
+  $('statResults').textContent = total.toLocaleString();
+  topStat.innerHTML = `<strong>${total.toLocaleString()}</strong> entries found`;
+  resultCount.innerHTML = `Showing <strong>${entries.length}</strong> of <strong>${total.toLocaleString()}</strong> entries`;
+  toolbar.style.display = 'flex';
 
-function initData(data) {
-  ALL_ENTRIES = data;
-  // Count Shina forms
-  let shinaForms = 0;
-  ALL_ENTRIES.forEach(e => {
-    (e.attestations || []).forEach(a => {
-      if (a.is_shina) {
-        if (a.dialects) a.dialects.forEach(d => shinaForms += (d.forms || []).length);
-        else shinaForms += (a.forms || []).length;
-      }
-    });
-  });
-  const shinaCount = ALL_ENTRIES.filter(e => e.has_shina).length;
-  document.getElementById('statTotal').textContent = ALL_ENTRIES.length.toLocaleString();
-  document.getElementById('statShina').textContent = shinaCount.toLocaleString();
-  document.getElementById('statForms').textContent = shinaForms.toLocaleString();
-  document.getElementById('topStat').innerHTML = `<strong>${ALL_ENTRIES.length.toLocaleString()}</strong> entries loaded`;
-  applyFilters();
-}
-
-// ── SEARCH + FILTER ──
-function applyFilters() {
-  const q = state.query.toLowerCase().trim();
-  filtered = ALL_ENTRIES.filter(entry => {
-    if (state.filterMode === 'shina' && !entry.has_shina) return false;
-    if (state.inherited) {
-      const hasInherited = (entry.attestations || []).some(a => a.gloss_inherited && a.is_shina);
-      if (!hasInherited) return false;
-    }
-    if (state.family !== 'all') {
-      const has = (entry.attestations || []).some(a => a.family === state.family);
-      if (!has) return false;
-    }
-    if (state.dialect !== 'all') {
-      let has = false;
-      (entry.attestations || []).forEach(a => {
-        if (a.dialects) a.dialects.forEach(d => { if (d.abbv === state.dialect) has = true; });
-        else if (a.abbv === state.dialect) has = true;
-      });
-      if (!has) return false;
-    }
-    if (!q) return true;
-    // Search headword
-    if ((entry.headword || '').toLowerCase().includes(q)) return true;
-    // Search gloss
-    if ((entry.headword_gloss || '').toLowerCase().includes(q)) return true;
-    // Search etymology
-    if ((entry.etymology || '').toLowerCase().includes(q)) return true;
-    // Search attestation forms and glosses
-    for (const a of (entry.attestations || [])) {
-      if ((a.raw_text || '').toLowerCase().includes(q)) return true;
-      const forms = a.dialects ? a.dialects.flatMap(d => d.forms || []) : (a.forms || []);
-      for (const f of forms) {
-        if ((f.form || '').toLowerCase().includes(q)) return true;
-        if ((f.gloss || '').toLowerCase().includes(q)) return true;
-      }
-    }
-    return false;
-  });
-  currentPage = 1;
-  document.getElementById('statResults').textContent = filtered.length.toLocaleString();
-  render();
-}
-
-function hl(text, q) {
-  if (!q || !text) return esc(text || '');
-  const regex = new RegExp('(' + q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
-  return esc(text).replace(regex, '<mark>$1</mark>');
-}
-function esc(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-// ── RENDER ──
-function render() {
-  const main = document.getElementById('main');
-  const q = state.query.toLowerCase().trim();
-
-  if (!ALL_ENTRIES.length) return;
-  if (filtered.length === 0) {
-    main.innerHTML = `<div class="empty-state"><h2>No results</h2><p>Try a different search term or adjust the filters.</p></div>`;
+  if (entries.length === 0) {
+    entryList.innerHTML = `<div class="empty-state"><h2>No results</h2><p>Try a different search or filter.</p></div>`;
+    pagination.style.display = 'none';
     return;
   }
 
-  const start = (currentPage - 1) * PER_PAGE;
-  const page = filtered.slice(start, start + PER_PAGE);
-  const totalPages = Math.ceil(filtered.length / PER_PAGE);
+  entryList.innerHTML = entries.map(e => renderCard(e)).join('');
 
-  let html = `<div class="toolbar">
-    <div class="result-count"><strong>${filtered.length.toLocaleString()}</strong> results${q ? ` for "<strong>${esc(q)}</strong>"` : ''}</div>
-    <select class="sort-sel" id="sortSel">
-      <option value="num">Sort: entry number</option>
-      <option value="az">Sort: headword A–Z</option>
-      <option value="shina">Sort: Shina forms ↓</option>
-    </select>
-    <button class="export-btn" onclick="exportCSV()">Export CSV</button>
-  </div>`;
+  entryList.querySelectorAll('.entry-head').forEach(h => {
+    h.addEventListener('click', () => {
+      const card = h.closest('.entry-card');
+      card.classList.toggle('expanded');
+      if (card.classList.contains('expanded') && !card.dataset.rendered) {
+        card.dataset.rendered = '1';
+        initTabs(card);
+      }
+    });
+  });
 
-  page.forEach(entry => { html += renderCard(entry, q); });
+  renderPagination(page, total_pages);
+}
 
-  // Pagination
-  if (totalPages > 1) {
-    html += `<div class="pagination">
-      <button class="page-btn" onclick="goPage(${currentPage-1})" ${currentPage===1?'disabled':''}>← Prev</button>
-      <span class="page-info">Page ${currentPage} of ${totalPages}</span>
-      <button class="page-btn" onclick="goPage(${currentPage+1})" ${currentPage===totalPages?'disabled':''}>Next →</button>
+function renderCard(e) {
+  const shinaBadge  = e.has_shina ? `<span class="shina-badge">✦ SHINA</span>` : '';
+  const genderBadge = e.headword_gender ? `<span class="hw-gender">${esc(e.headword_gender)}</span>` : '';
+  const gloss       = e.headword_gloss  ? `<span class="hw-gloss">${esc(e.headword_gloss)}</span>` : '';
+
+  let compactShina = '';
+  if (e.has_shina && e.attestations) {
+    const pills = [];
+    for (const att of e.attestations) {
+      if (!att.is_shina) continue;
+      if (att.dialects && att.dialects.length) {
+        for (const d of att.dialects)
+          for (const f of (d.forms || []))
+            pills.push(`<span class="c-form"><span class="c-dialect">${esc(d.abbv)}</span>${esc(f.form)}</span>`);
+      } else {
+        for (const f of (att.forms || []))
+          pills.push(`<span class="c-form">${esc(f.form)}</span>`);
+      }
+    }
+    if (pills.length)
+      compactShina = `<div class="entry-compact"><div class="compact-shina-forms">${pills.join('')}</div></div>`;
+  }
+
+  return `
+<div class="entry-card ${e.has_shina ? 'has-shina' : ''}" data-id="${e.id}">
+  <div class="entry-head">
+    <span class="entry-num">#${e.entry_num}</span>
+    <span class="headword">${esc(e.headword)}</span>
+    ${genderBadge}${gloss}${shinaBadge}
+    <span class="expand-toggle">⌄</span>
+  </div>
+  ${compactShina}
+  <div class="entry-body" id="body-${e.id}">
+    <div style="padding:8px 0;font-size:13px;color:var(--text3);font-family:system-ui,sans-serif">Loading…</div>
+  </div>
+</div>`;
+}
+
+// ── LAZY TAB LOADER ──────────────────────────────────────────────────────────
+function initTabs(card) {
+  const id   = card.dataset.id;
+  const body = card.querySelector('.entry-body');
+  fetch(`${API_BASE}?id=${id}`)
+    .then(r => r.json())
+    .then(e => { body.innerHTML = buildEntryBody(e); attachTabLogic(body); })
+    .catch(() => { body.innerHTML = `<div class="empty-state"><p>Failed to load entry.</p></div>`; });
+}
+
+function buildEntryBody(e) {
+  const attByFamily = {};
+  for (const att of (e.attestations || [])) {
+    const fam = att.family || 'Other';
+    if (!attByFamily[fam]) attByFamily[fam] = [];
+    attByFamily[fam].push(att);
+  }
+
+  const shinaAtts = (e.attestations || []).filter(a => a.is_shina);
+  let shinaTab = '';
+
+  if (shinaAtts.length) {
+    shinaTab = shinaAtts.map(att => {
+      const inheritedTag = att.gloss_inherited
+        ? `<span class="inherited-label">inherited: ${esc(att.inherited_gloss)}</span>` : '';
+
+      if (att.dialects && att.dialects.length) {
+        const rows = att.dialects.map(d => {
+          const abbvName = DIALECT_NAMES[d.abbv] || d.lang_name;
+          const pills = (d.forms || []).map(f =>
+            `<span class="d-pill">${esc(f.form)}${f.gender ? `<span class="g">${esc(f.gender)}</span>` : ''}${f.gloss ? `<span class="gl">${esc(f.gloss)}</span>` : ''}</span>`
+          ).join('');
+          return `<div class="dialect-row">
+            <div class="dialect-name">${esc(abbvName)} <span class="dialect-abbv">${esc(d.abbv)}</span></div>
+            <div class="d-forms">${pills || '<span class="no-forms-note">see raw text</span>'}</div>
+          </div>`;
+        }).join('');
+        return `<div class="shina-block">
+          <div class="shina-block-title">✦ Shina ${inheritedTag}</div>
+          ${rows}
+        </div>`;
+      } else {
+        const pills = (att.forms || []).map(f =>
+          `<span class="d-pill">${esc(f.form)}${f.gender ? `<span class="g">${esc(f.gender)}</span>` : ''}${f.gloss ? `<span class="gl">${esc(f.gloss)}</span>` : ''}</span>`
+        ).join('');
+        return `<div class="shina-block">
+          <div class="shina-block-title">✦ Shina ${inheritedTag}</div>
+          <div class="d-forms">${pills || `<span class="no-forms-note">${esc(att.raw_text)}</span>`}</div>
+        </div>`;
+      }
+    }).join('');
+  }
+
+  const familyOrder = ['Dardic','Kafiri','NIA','MIA','OIA','Iranian','Other'];
+  let allLangsHTML = '';
+  for (const fam of familyOrder) {
+    const atts = attByFamily[fam];
+    if (!atts) continue;
+    const rows = atts.map(att => {
+      const cls  = FAMILY_CLASS[fam] || 'lb-other';
+      const pills = (att.forms || []).map(f =>
+        `<span class="form-pill">${esc(f.form)}${f.gender ? `<span class="g">${f.gender}</span>` : ''}${f.gloss ? `<span class="gl">${esc(f.gloss)}</span>` : ''}</span>`
+      ).join('');
+      const content = pills
+        ? `<div class="form-pills">${pills}</div>`
+        : (att.raw_text ? `<span class="raw-text-val">${esc(att.raw_text)}</span>` : '<span class="no-form">—</span>');
+      return `<div class="lang-row">
+        <div><span class="lang-badge ${cls}">${esc(att.abbv)}</span></div>
+        <div>${content}</div>
+      </div>`;
+    }).join('');
+    allLangsHTML += `<div class="lang-section">
+      <div class="lang-family-head">${fam}</div>
+      ${rows}
     </div>`;
   }
 
-  main.innerHTML = html;
+  const etymLine = (STATE.showEtym && e.etymology)
+    ? `<div class="etym-line">< ${esc(e.etymology)}</div>` : '';
 
-  // Restore sort
-  const sel = document.getElementById('sortSel');
-  if (sel) {
-    sel.value = window._sortMode || 'num';
-    sel.addEventListener('change', e => {
-      window._sortMode = e.target.value;
-      sortFiltered(e.target.value);
-      currentPage = 1;
-      render();
-    });
-  }
-}
+  const xrefs = e.cross_refs
+    ? `<div class="xref-list">${e.cross_refs.split(/[,;\n]+/).filter(Boolean).map(x =>
+        `<button class="xref-link" onclick="searchFor('${esc(x.trim())}')">${esc(x.trim())}</button>`
+      ).join('')}</div>` : '<span class="no-form">None</span>';
 
-function renderCard(entry, q) {
-  const shinaBadge = entry.has_shina ? `<span class="shina-badge">✦ SHINA</span>` : '';
-  const genderBadge = entry.headword_gender ? `<span class="hw-gender">${esc(entry.headword_gender)}.</span>` : '';
+  const tabShina       = shinaAtts.length ? `<div class="tab active" data-tab="shina">Shina (${shinaAtts.length})</div>` : '';
+  const activeIfNoShina = shinaAtts.length ? '' : ' active';
 
-  // Compact Shina forms for collapsed view
-  let compactShina = '';
-  if (entry.has_shina) {
-    const shinaAtts = (entry.attestations||[]).filter(a=>a.is_shina);
-    let pills = '';
-    shinaAtts.forEach(a => {
-      const dialects = a.dialects || [{abbv: a.abbv, lang_name: a.lang_name, forms: a.forms}];
-      dialects.slice(0,5).forEach(d => {
-        (d.forms||[]).slice(0,2).forEach(f => {
-          if (f.form && f.form.length < 30) {
-            pills += `<span class="c-form"><span class="c-dialect">${esc(d.abbv||'')}</span>${hl(f.form,q)}</span>`;
-          }
-        });
-      });
-    });
-    if (pills) compactShina = `<div class="entry-compact"><div class="compact-shina-forms">${pills}</div></div>`;
-  }
-
-  return `<div class="entry-card ${entry.has_shina?'has-shina':''}" id="card-${entry.entry_num}">
-    <div class="entry-head" onclick="toggleCard(${entry.entry_num})">
-      <span class="entry-num">#${entry.entry_num}</span>
-      <span class="headword">${hl(entry.headword||'',q)}</span>
-      ${genderBadge}
-      <span class="hw-gloss">'${hl(entry.headword_gloss||'',q)}'</span>
-      ${shinaBadge}
-      <span class="expand-toggle">⌄</span>
+  return `
+    ${etymLine}
+    <div class="tabs">
+      ${tabShina}
+      <div class="tab${activeIfNoShina}" data-tab="all">All Languages</div>
+      <div class="tab" data-tab="raw">Raw Text</div>
+      <div class="tab" data-tab="refs">Cross-refs</div>
     </div>
-    ${compactShina}
-    <div class="entry-body">
-      ${state.showEtym && entry.etymology ? `<div class="etym-line">Etymology: ${esc(entry.etymology)}</div>` : ''}
-      <div class="tabs">
-        ${entry.has_shina ? `<div class="tab active" onclick="switchTab(event,${entry.entry_num},'shina')">Shina</div>` : ''}
-        <div class="tab ${!entry.has_shina?'active':''}" onclick="switchTab(event,${entry.entry_num},'all')">All languages</div>
-        <div class="tab" onclick="switchTab(event,${entry.entry_num},'raw')">Raw text</div>
-        ${entry.cross_refs ? `<div class="tab" onclick="switchTab(event,${entry.entry_num},'xref')">Cross-refs</div>` : ''}
-      </div>
-      ${entry.has_shina ? renderShinaPanel(entry, q) : ''}
-      ${renderAllPanel(entry, q, !entry.has_shina)}
-      ${renderRawPanel(entry)}
-      ${entry.cross_refs ? renderXrefPanel(entry) : ''}
-    </div>
-  </div>`;
+    ${shinaAtts.length ? `<div class="tab-panel active" data-panel="shina">${shinaTab}</div>` : ''}
+    <div class="tab-panel${activeIfNoShina}" data-panel="all">${allLangsHTML}</div>
+    <div class="tab-panel" data-panel="raw"><div class="raw-block">${esc(e.attestation_raw || '')}${e.addenda ? '\n\n[Addenda]\n' + esc(e.addenda) : ''}</div></div>
+    <div class="tab-panel" data-panel="refs">${xrefs}</div>
+  `;
 }
 
-function renderShinaPanel(entry, q) {
-  const shinaAtts = (entry.attestations||[]).filter(a=>a.is_shina);
-  let html = `<div class="tab-panel active" data-tab="shina" data-entry="${entry.entry_num}">`;
-  shinaAtts.forEach(a => {
-    const inh = a.gloss_inherited && a.inherited_gloss;
-    html += `<div class="shina-block">
-      <div class="shina-block-title">
-        ✦ Shina attestations
-        ${inh ? `<span class="inherited-label">inherited: '${esc(a.inherited_gloss)}'</span>` : ''}
-      </div>`;
-    const dialects = a.dialects || [{abbv:a.abbv, lang_name:a.lang_name, forms:a.forms, raw_text:a.raw_text}];
-    dialects.forEach(d => {
-      const dName = DIALECT_NAMES[d.abbv] || d.lang_name || d.abbv;
-      const forms = (d.forms||[]);
-      html += `<div class="dialect-row">
-        <div class="dialect-name">${esc(dName)} <span class="dialect-abbv">${esc(d.abbv||'')}</span></div>
-        <div class="d-forms">`;
-      if (forms.length === 0 && d.raw_text) {
-        html += `<span class="no-forms-note">${esc(d.raw_text.slice(0,80))}</span>`;
-      } else if (forms.length === 0) {
-        html += `<span class="no-forms-note">—</span>`;
-      } else {
-        forms.forEach(f => {
-          if (!f.form || f.form.length > 60) return;
-          const genderStr = f.gender ? `<span class="g">${esc(f.gender)}.</span>` : '';
-          const glossStr = f.gloss ? `<span class="gl">'${hl(f.gloss, q)}'</span>` : '';
-          html += `<span class="d-pill">${hl(f.form,q)}${genderStr}${glossStr}</span>`;
-        });
-      }
-      html += `</div></div>`;
+function attachTabLogic(body) {
+  body.querySelectorAll('.tab').forEach(t => {
+    t.addEventListener('click', () => {
+      const panel = t.dataset.tab;
+      body.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+      body.querySelectorAll('.tab-panel').forEach(x => x.classList.remove('active'));
+      t.classList.add('active');
+      body.querySelector(`[data-panel="${panel}"]`)?.classList.add('active');
     });
-    html += `</div>`;
   });
-  html += `</div>`;
-  return html;
 }
 
-function renderAllPanel(entry, q, active) {
-  const atts = entry.attestations || [];
-  if (!atts.length) return `<div class="tab-panel ${active?'active':''}" data-tab="all" data-entry="${entry.entry_num}"><div class="no-form">No attestations recorded.</div></div>`;
+// ── PAGINATION ────────────────────────────────────────────────────────────────
+function renderPagination(current, total) {
+  if (total <= 1) { pagination.style.display = 'none'; return; }
+  pagination.style.display = 'flex';
 
-  // Group by family
-  const byFamily = {};
-  atts.forEach(a => {
-    if (state.collapseOther && !a.is_shina) return;
-    const fam = a.family || 'Other';
-    if (!byFamily[fam]) byFamily[fam] = [];
-    byFamily[fam].push(a);
-  });
+  const pages = new Set([1]);
+  for (let i = Math.max(2, current - 2); i <= Math.min(total - 1, current + 2); i++) pages.add(i);
+  pages.add(total);
+  const deduped = [...pages].sort((a, b) => a - b);
 
-  let html = `<div class="tab-panel ${active?'active':''}" data-tab="all" data-entry="${entry.entry_num}">`;
-  const famOrder = ['OIA','MIA','Dardic','NIA','Kafiri','Iranian','Semitic','Dravidian','Isolate','Sino-Tibetan','Turkic','Germanic','Austro-Asiatic','Other'];
-  famOrder.forEach(fam => {
-    if (!byFamily[fam]) return;
-    html += `<div class="lang-section">
-      <div class="lang-family-head">${esc(fam)}</div>`;
-    byFamily[fam].forEach(a => {
-      const cls = FAMILY_CLASS[a.family] || 'lb-other';
-      const forms = a.dialects ? a.dialects.flatMap(d=>d.forms||[]) : (a.forms||[]);
-      html += `<div class="lang-row">
-        <div><span class="lang-badge ${cls}">${esc(a.abbv)}</span></div>
-        <div class="form-pills">`;
-      if (forms.length === 0) {
-        html += `<span class="no-form">${a.raw_text ? esc(a.raw_text.slice(0,60)) : '—'}</span>`;
-      } else {
-        forms.slice(0,6).forEach(f => {
-          if (!f.form || f.form.length>50) return;
-          const g = f.gender ? `<span class="g">${esc(f.gender)}.</span>` : '';
-          const gl = f.gloss ? `<span class="gl">'${hl(f.gloss,q)}'</span>` : '';
-          html += `<span class="form-pill">${hl(f.form,q)}${g}${gl}</span>`;
-        });
-        if (forms.length > 6) html += `<span class="no-form">+${forms.length-6} more</span>`;
-      }
-      html += `</div></div>`;
-    });
-    html += `</div>`;
-  });
-  html += `</div>`;
-  return html;
-}
-
-function renderRawPanel(entry) {
-  return `<div class="tab-panel" data-tab="raw" data-entry="${entry.entry_num}">
-    <div class="raw-block">${esc(entry.attestation_raw || '(no attestation text)')}</div>
-    ${entry.addenda ? `<div style="margin-top:10px"><div class="lang-family-head">Addenda</div><div class="raw-block">${esc(entry.addenda)}</div></div>` : ''}
-  </div>`;
-}
-
-function renderXrefPanel(entry) {
-  const refs = (entry.cross_refs||'').split(/[\s,]+/).filter(r=>r.length>2);
-  let links = refs.map(r => `<button class="xref-link" onclick="searchFor('${esc(r)}')">${esc(r)}</button>`).join('');
-  return `<div class="tab-panel" data-tab="xref" data-entry="${entry.entry_num}">
-    <div class="xref-list">${links}</div>
-  </div>`;
-}
-
-// ── INTERACTIONS ──
-function toggleCard(num) {
-  const card = document.getElementById('card-'+num);
-  if (!card) return;
-  card.classList.toggle('expanded');
-}
-
-function switchTab(e, num, tabName) {
-  e.stopPropagation();
-  const card = document.getElementById('card-'+num);
-  if (!card) return;
-  if (!card.classList.contains('expanded')) card.classList.add('expanded');
-  card.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  card.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-  e.target.classList.add('active');
-  const panel = card.querySelector(`.tab-panel[data-tab="${tabName}"]`);
-  if (panel) panel.classList.add('active');
+  let html = `<button class="page-btn" ${current === 1 ? 'disabled' : ''} onclick="goPage(${current - 1})">← Prev</button>`;
+  let prev = 0;
+  for (const p of deduped) {
+    if (p - prev > 1) html += `<span class="page-ellipsis">…</span>`;
+    html += `<button class="page-num-btn ${p === current ? 'current' : ''}" onclick="goPage(${p})">${p}</button>`;
+    prev = p;
+  }
+  html += `<button class="page-btn" ${current === total ? 'disabled' : ''} onclick="goPage(${current + 1})">Next →</button>`;
+  html += `<span class="page-info">${current} / ${total}</span>`;
+  pagination.innerHTML = html;
 }
 
 function goPage(p) {
-  currentPage = p;
-  render();
-  document.getElementById('main').scrollTop = 0;
+  STATE.page = p;
+  loadEntries();
+  document.querySelector('.main').scrollTo(0, 0);
 }
 
-function sortFiltered(mode) {
-  if (mode === 'az') filtered.sort((a,b) => (a.headword||'').localeCompare(b.headword||''));
-  else if (mode === 'num') filtered.sort((a,b) => a.entry_num - b.entry_num);
-  else if (mode === 'shina') {
-    filtered.sort((a,b) => {
-      const ca = (a.attestations||[]).filter(x=>x.is_shina).length;
-      const cb = (b.attestations||[]).filter(x=>x.is_shina).length;
-      return cb - ca;
-    });
-  }
+// ── CONTROLS ─────────────────────────────────────────────────────────────────
+function searchFor(q) {
+  STATE.q = q;
+  STATE.page = 1;
+  searchInput.value = q;
+  searchClear.style.display = 'block';
+  loadEntries();
 }
 
-function searchFor(term) {
-  document.getElementById('searchInput').value = term;
-  state.query = term;
-  document.getElementById('searchClear').style.display = 'block';
-  applyFilters();
+document.querySelectorAll('.chip[data-filter]').forEach(c => c.addEventListener('click', () => {
+  document.querySelectorAll('.chip[data-filter]').forEach(x => x.classList.remove('active'));
+  c.classList.add('active');
+  STATE.filter = c.dataset.filter; STATE.page = 1; loadEntries();
+}));
+
+document.querySelectorAll('.chip[data-family]').forEach(c => c.addEventListener('click', () => {
+  document.querySelectorAll('.chip[data-family]').forEach(x => x.classList.remove('active'));
+  c.classList.add('active');
+  STATE.family = c.dataset.family; STATE.page = 1; loadEntries();
+}));
+
+document.querySelectorAll('.chip[data-dialect]').forEach(c => c.addEventListener('click', () => {
+  document.querySelectorAll('.chip[data-dialect]').forEach(x => x.classList.remove('active'));
+  c.classList.add('active');
+  STATE.dialect = c.dataset.dialect; STATE.page = 1; loadEntries();
+}));
+
+$('optInherited').addEventListener('change', e => { STATE.inherited = e.target.checked; STATE.page = 1; loadEntries(); });
+$('optShowEtym').addEventListener('change',  e => { STATE.showEtym = e.target.checked; });
+$('optCollapseOther').addEventListener('change', e => { STATE.collapseOther = e.target.checked; });
+
+let searchTimer2 = null;
+searchInput.addEventListener('input', () => {
+  searchClear.style.display = searchInput.value ? 'block' : 'none';
+  clearTimeout(searchTimer2);
+  searchTimer2 = setTimeout(() => {
+    STATE.q = searchInput.value.trim();
+    STATE.page = 1;
+    loadEntries();
+  }, 320);
+});
+
+searchClear.addEventListener('click', () => {
+  searchInput.value = '';
+  searchClear.style.display = 'none';
+  STATE.q = ''; STATE.page = 1; loadEntries();
+});
+
+sortSel.addEventListener('change', () => { STATE.sort = sortSel.value; STATE.page = 1; loadEntries(); });
+perPageSel.addEventListener('change', () => { STATE.perPage = parseInt(perPageSel.value); STATE.page = 1; loadEntries(); });
+
+// ── UTILS ─────────────────────────────────────────────────────────────────────
+function esc(s) {
+  if (!s) return '';
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
 }
 
-function exportCSV() {
-  if (!filtered.length) return;
-  const rows = [['entry_num','headword','headword_gloss','dialect','form','gloss','gloss_inherited']];
-  filtered.forEach(entry => {
-    const shinAs = (entry.attestations||[]).filter(a=>a.is_shina);
-    if (shinAs.length === 0) {
-      rows.push([entry.entry_num, entry.headword, entry.headword_gloss, '', '', '', '']);
-    } else {
-      shinAs.forEach(a => {
-        const dialects = a.dialects || [{abbv:a.abbv,forms:a.forms}];
-        dialects.forEach(d => {
-          const forms = d.forms||[];
-          if (forms.length === 0) {
-            rows.push([entry.entry_num, entry.headword, entry.headword_gloss, d.abbv, '', a.inherited_gloss||'', a.gloss_inherited?'yes':'no']);
-          } else {
-            forms.forEach(f => {
-              rows.push([entry.entry_num, entry.headword, entry.headword_gloss, d.abbv, f.form, f.gloss||a.inherited_gloss||'', a.gloss_inherited?'yes':'no']);
-            });
-          }
-        });
-      });
-    }
-  });
-  const csv = rows.map(r => r.map(c => `"${String(c||'').replace(/"/g,'""')}"`).join(',')).join('\n');
-  const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
-  a.download = 'cdial_export.csv';
-  a.click();
-}
-
-// ── WIRE UP ──
-document.getElementById('searchInput').addEventListener('input', e => {
-  state.query = e.target.value;
-  document.getElementById('searchClear').style.display = state.query ? 'block' : 'none';
-  applyFilters();
-});
-document.getElementById('searchClear').addEventListener('click', () => {
-  document.getElementById('searchInput').value = '';
-  state.query = '';
-  document.getElementById('searchClear').style.display = 'none';
-  applyFilters();
-});
-
-document.querySelectorAll('[data-filter]').forEach(chip => {
-  chip.addEventListener('click', () => {
-    document.querySelectorAll('[data-filter]').forEach(c=>c.classList.remove('active'));
-    chip.classList.add('active');
-    state.filterMode = chip.dataset.filter;
-    applyFilters();
-  });
-});
-
-document.querySelectorAll('[data-family]').forEach(chip => {
-  chip.addEventListener('click', () => {
-    document.querySelectorAll('[data-family]').forEach(c=>c.classList.remove('active'));
-    chip.classList.add('active');
-    state.family = chip.dataset.family;
-    applyFilters();
-  });
-});
-
-document.querySelectorAll('[data-dialect]').forEach(chip => {
-  chip.addEventListener('click', () => {
-    document.querySelectorAll('[data-dialect]').forEach(c=>c.classList.remove('active'));
-    chip.classList.add('active');
-    state.dialect = chip.dataset.dialect;
-    applyFilters();
-  });
-});
-
-document.getElementById('optInherited').addEventListener('change', e => {
-  state.inherited = e.target.checked;
-  applyFilters();
-});
-document.getElementById('optShowEtym').addEventListener('change', e => {
-  state.showEtym = e.target.checked;
-  applyFilters();
-});
-document.getElementById('optCollapseOther').addEventListener('change', e => {
-  state.collapseOther = e.target.checked;
-  applyFilters();
-});
-
-document.getElementById('fileInput')?.addEventListener('change', handleFile);
-
-// Keyboard shortcuts
-document.addEventListener('keydown', e => {
-  if (e.key === '/' && document.activeElement.tagName !== 'INPUT') {
-    e.preventDefault();
-    document.getElementById('searchInput').focus();
-  }
-  if (e.key === 'Escape') document.getElementById('searchInput').blur();
-});
-
-// ── START ──
-tryAutoLoad();
+// ── BOOT ──────────────────────────────────────────────────────────────────────
+loadEntries();
